@@ -332,15 +332,13 @@ export default function Home() {
 
           {/* Right: Globe + Leaderboard */}
           <section className="w-full lg:w-1/2 border-t lg:border-t-0 lg:border-l border-gray-800 p-4 sm:p-8 flex flex-col items-center">
-            <div className="w-full mb-8">
-              <canvas></canvas>
+            {/* Container for the Globe Iframe */}
+            <div className="w-full h-96 mb-8 bg-black"> {/* Ensure this container is black */}
               <iframe
                 ref={globeIframeRef}
                 src="/globe"
-                className="w-full h-72 md:h-96 lg:h-[50vh] rounded-lg overflow-hidden"
-                style={{ border: 'none' }}
-                scrolling="no"
-                title="Cookie Globe"
+                title="Interactive Globe"
+                style={{ width: '100%', height: '100%', border: 'none' }}
               />
             </div>
             <h2 className="text-3xl font-semibold mb-6">Leaderboard</h2>

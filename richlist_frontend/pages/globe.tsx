@@ -32,7 +32,7 @@ const ClientSideGlobe = () => {
         return; // Exit if container not ready or globe already initialized
       }
 
-      const globeContainer = globeContainer.current;
+      const globeContainer = containerRef.current;
       console.log('Globe useEffect: Dynamically importing THREE, ThreeGlobe, and TrackballControls...');
 
       const canvas = canvasRef.current; // Get the canvas element from the ref
@@ -56,6 +56,27 @@ const ClientSideGlobe = () => {
           return;
         }
 
+        // --- Fetch Country Data ---
+        let countryFeatures: any[] = []; // Use 'any[]' or a more specific GeoJSON Feature type
+        try {
+          const response = await fetch('/data/countries.geojson'); // Path relative to public folder
+          if (response.ok) {
+            const geoJsonData = await response.json();
+            if (geoJsonData && Array.isArray(geoJsonData.features)) {
+              countryFeatures = geoJsonData.features;
+              console.log('Globe: Successfully fetched and parsed country data.');
+            } else {
+              console.warn('Globe: Fetched country data is not in the expected GeoJSON FeatureCollection format or features array is missing.');
+            }
+          } else {
+            console.warn(`Globe: Failed to fetch country data. Status: ${response.status}`);
+          }
+        } catch (error) {
+          console.error('Globe: Error fetching or parsing country data:', error);
+        }
+        // --- End Fetch Country Data ---
+
+
         const globeInstance = new ThreeGlobe({
           waitForGlobeReady: true, // Wait for textures/materials
           animateIn: true,      // Enable built-in intro animation
@@ -63,26 +84,39 @@ const ClientSideGlobe = () => {
         // .globeImageUrl('/assets/globe/earth-dark.jpg') // Remove image texture
         // .bumpImageUrl('/assets/globe/earth-topology.png') // Remove bump map
         .globeMaterial(new THREE.MeshPhongMaterial({ // Set a basic material
-          color: 0x111122, // Dark blue/purpleish
-          specular: 0x080808,
+          color: 0x3b2e9d, // Dark blue/purpleish
+          specular: 0x111111,
           shininess: 20,
           // wireframe: true, // Optionally make the base globe wireframe
         }));
 
-        // Sample GeoJSON data for a few hexagons
-        // In a real application, you'd load or generate a full set of hexagonal polygons
-        const sampleHexFeatures = [
-          { "type": "Feature", "geometry": { "type": "Polygon", "coordinates": [[[0,0],[5,10],[10,0],[5,-10],[0,0]]] } }, // Simplified diamond for demo
-          { "type": "Feature", "geometry": { "type": "Polygon", "coordinates": [[[20,20],[25,30],[30,20],[25,10],[20,20]]] } }
-          // NOTE: These are NOT true hexagons. Generating proper spherical hexagons is complex.
-          // This is just to demonstrate the hexPolygonsData API.
-        ];
+        if (countryFeatures.length > 0) {
+          globeInstance
+            .hexPolygonsData(countryFeatures) // Use the fetched country features
+            .hexPolygonResolution(3)          // Resolution of the hexagons
+            .hexPolygonMargin(0.7)            // Margin between hexagons (example used 0.3)
+            .hexPolygonUseDots(true)          // Render hexagons as dots
+            .hexPolygonColor(() => '#ffffff') // Set all hexagons to white (or your preferred color)
+            // .hexPolygonLabel( ({ properties: d }) => `
+            //   <b>${d.ADMIN} (${d.ISO_A2})</b> <br />
+            //   Population: <i>${d.POP_EST}</i>
+            // `) // Optional: if your geojson has properties for labels
+            ;
+        } else {
+          console.log('Globe: No country data loaded, or data was empty. Hexagon layer will not be rendered.');
+          // Optionally, you could add a very simple default visualization here if hex data fails to load
+          // For example, using the sampleHexFeatures if you want a fallback:
+          // const sampleHexFeatures = [
+          //   { "type": "Feature", "geometry": { "type": "Polygon", "coordinates": [[[0,0],[5,10],[10,0],[5,-10],[0,0]]] } },
+          //   { "type": "Feature", "geometry": { "type": "Polygon", "coordinates": [[[20,20],[25,30],[30,20],[25,10],[20,20]]] } }
+          // ];
+          // globeInstance
+          //   .hexPolygonsData(sampleHexFeatures)
+          //   .hexPolygonColor(() => `#${Math.floor(Math.random()*16777215).toString(16)}`)
+          //   .hexPolygonAltitude(0.005)
+          //   .hexPolygonMargin(0.1);
+        }
 
-        globeInstance
-          .hexPolygonsData(sampleHexFeatures)
-          .hexPolygonColor(() => `#${Math.floor(Math.random()*16777215).toString(16)}`) // Random color for each hex
-          .hexPolygonAltitude(0.005) // Slight altitude to make them pop
-          .hexPolygonMargin(0.1);   // Margin between hexagons (adjust for desired gap)
 
          // Initialize renderer using the existing canvas element
         const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
@@ -91,9 +125,27 @@ const ClientSideGlobe = () => {
         //globeContainer.appendChild(renderer.domElement);
 
         const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000000);
         scene.add(globeInstance);
-        scene.add(new THREE.AmbientLight(0xcccccc, Math.PI));
-        scene.add(new THREE.DirectionalLight(0xffffff, 0.6 * Math.PI));
+        // --- Lighting Setup (4 Light Sources) ---
+        // 1. AmbientLight for soft overall exposure
+        scene.add(new THREE.AmbientLight(0xbbbbbb, 0.4 * Math.PI)); // Subtle white ambient light
+
+        // 2. Strong DirectionalLight from above
+        const topLight = new THREE.DirectionalLight(0xffffff, 0.8 * Math.PI); // Bright white light
+        topLight.position.set(0, 10, 0); // Positioned above the globe
+        scene.add(topLight);
+
+        // 3. Colored DirectionalLight (e.g., from the side, cool tone)
+        const sideLight1 = new THREE.DirectionalLight(0xffffff, 0.3 * Math.PI); // Blue light
+        sideLight1.position.set(-5, 5, 5); // Positioned from side/front
+        scene.add(sideLight1);
+
+        // 4. Colored DirectionalLight (e.g., from another side, warm tone)
+        const sideLight2 = new THREE.DirectionalLight(0xffffff, 0.3 * Math.PI); // Pink/Magenta light
+        sideLight2.position.set(5, 5, -5); // Positioned from other side/back
+        scene.add(sideLight2);
+        // --- End Lighting Setup ---
 
         const camera = new THREE.PerspectiveCamera();
         camera.aspect = globeContainer.offsetWidth / globeContainer.offsetHeight;
@@ -102,14 +154,19 @@ const ClientSideGlobe = () => {
 
         const tbControls = new TrackballControls(camera, renderer.domElement);
         tbControls.minDistance = 101;
-        tbControls.rotateSpeed = 3.0;
+        // tbControls.rotateSpeed = 3.0; // Default is 1.0, but we'll disable rotation
         tbControls.zoomSpeed = 0.8;
+        // Make camera stationary by disabling rotation and panning via controls
+        tbControls.noRotate = false; // Set to true to disable rotation
+        tbControls.noPan = true;    // Set to true to disable panning
+        tbControls.noZoom = false;   // Set to false to enable zoom
 
 
         let animationFrameId: number;
         (function animate() {
           if (!isMounted) return; // Stop animation if unmounted
           tbControls.update();
+          if (globeInstance) globeInstance.rotation.y += 0.0005; // Rotate the globe slowly
           renderer.render(scene, camera);
           animationFrameId = requestAnimationFrame(animate);
         })();
@@ -132,10 +189,6 @@ const ClientSideGlobe = () => {
             const { lat, lng } = messageData.payload;
             console.log('Globe (ClientSideGlobe): Received new location - Lat:', lat, 'Lng:', lng);
             
-            // The previous detailed logging confirmed window.myGlobeInstance is the Globe object.
-            // The typeof check for pointOfView was problematic.
-            // If window.myGlobeInstance exists, we will assume pointOfView is available as per ThreeGlobe API.
-
             if (window.myGlobeInstance) {
               console.log('Globe (ClientSideGlobe): Manually positioning camera for new lat/lng.');
 
@@ -187,7 +240,7 @@ const ClientSideGlobe = () => {
                 console.warn('Globe (ClientSideGlobe): Camera or TrackballControls not available in handleParentMessage scope.');
               }
             } else {
-              console.warn('Globe (ClientSideGlobe): window.myGlobeInstance is not available when trying to call pointOfView.');
+              // This console log was duplicated, keeping one for clarity
               console.warn('Globe (ClientSideGlobe): window.myGlobeInstance is not available when message received.');
             }
           }
@@ -225,14 +278,19 @@ const ClientSideGlobe = () => {
           // Kill all GSAP tweens associated with camera.position and tbControls.target
           gsap.killTweensOf(camera?.position); // camera might be null if init failed early
           gsap.killTweensOf(tbControls?.target); // tbControls might be null
-          if (globeContainer.current && renderer.domElement.parentElement === globeContainer.current) {
-            window.removeEventListener('message', handleParentMessage); // Cleanup message listener
-            // Check if it's still a child before removing
-            globeContainer.current.removeChild(renderer.domElement);
-          }
+          
+          // Since we are providing the canvas to the renderer, we don't removeChild from globeContainer.
+          // The canvas is part of the React component's JSX.
+          // if (globeContainer && renderer.domElement.parentElement === globeContainer) {
+          //   window.removeEventListener('message', handleParentMessage); // Cleanup message listener
+          //   globeContainer.removeChild(renderer.domElement);
+          // }
+          window.removeEventListener('message', handleParentMessage); // Still need to remove this listener
+
           renderer.dispose();
-          scene.clear();
-          // No standard dispose on ThreeGlobe instance itself
+          scene.clear(); // Clears children from the scene
+          // ThreeGlobe itself doesn't have a .dispose() method.
+          // Clearing the scene and renderer is the main cleanup for Three.js objects.
           delete window.myGlobeInstance;
         };
 
@@ -278,6 +336,7 @@ export default function GlobePage() {
             width: 100%;
             height: 100%;
             overflow: hidden;
+            background-color: #000; /* Ensure black background for the globe page */
           } /* The style on the canvas element itself also helps */
           div#globe-container > canvas {
              display: block !important;
