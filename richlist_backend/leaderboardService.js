@@ -4,18 +4,31 @@ const mongoose = require('mongoose');
 const entrySchema = new mongoose.Schema({
   name: { type: String, required: true },
   amount: { type: Number, required: true },
+  message: { type: String, default: "" },
+  locationLabel: { type: String, required: true },
+  position: { type: { type: String, enum: ['Point'], default: 'Point' },
+  coordinates: { type: [Number], index: '2dsphere' }},
+  createdAt: { type: Date, default: Date.now },
   stripeCustomerID: { type: String, required: true, unique: true },
-  link: { type: String, default: "" },
-  message: { type: String, default: "" }
 });
 
 // Create the Mongoose model
 const Entry = mongoose.model('Entry', entrySchema);
 
-// Get the leaderboard sorted by amount in descending order
+// Get the leaderboard sorted by creation date in descending order (newest first)
 async function getLeaderboard() {
   try {
-    const entries = await Entry.find().sort({ amount: -1 }).lean();
+    const entries = await Entry.find()
+      .sort({ createdAt: -1 }) // Sort by createdAt, newest first
+      .lean() // Use .lean() for faster queries when not needing Mongoose documents
+      .exec();
+
+    // Map entries to include lat and lng at the top level
+    return entries.map(entry => ({
+      ...entry,
+      lat: entry.position && entry.position.coordinates ? entry.position.coordinates[1] : undefined,
+      lng: entry.position && entry.position.coordinates ? entry.position.coordinates[0] : undefined,
+    }));
     return entries;
   } catch (err) {
     console.error('Error fetching leaderboard:', err);
@@ -30,14 +43,19 @@ async function addEntry(entry) {
     if (existing) {
       // Update existing entry's amount (top-up)
       existing.amount += entry.amount;
-      // Also update the link if a new one is provided (optional)
-      if (entry.link) {
-        existing.link = entry.link;
+      if (entry.message) { // Allow message update on top-up
+        existing.message = entry.message;
       }
+      // Decide if name, locationLabel, position can be updated on top-up.
+      // For simplicity, we're not updating them here.
       await existing.save();
     } else {
       // Create a new entry if one does not exist
-      await Entry.create(entry);
+      // Ensure all required fields are present in 'entry'
+      // 'entry.position' will be undefined if lat/lng were not in metadata,
+      // but the schema has a default for 'position.type', and 'coordinates' can be empty if not a 2dsphere query target.
+      // However, for consistency, ensure 'position' is always structured if lat/lng are provided.
+      await Entry.create(entry); 
     }
   } catch (err) {
     console.error('Error adding entry:', err);

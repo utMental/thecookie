@@ -28,18 +28,21 @@ mongoose.connect(process.env.MONGO_URI)
 
 // Stripe webhook endpoint (raw body required)
 app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
-  console.log('Stripe webhook received:', new Date().toISOString());
+  console.log(`[/webhook] Stripe webhook received at: ${new Date().toISOString()}`);
   const sig = req.headers['stripe-signature'];
   let event;
   try {
+    console.log('[/webhook] Attempting to construct event...');
     event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    console.log(`[/webhook] Event constructed successfully. Event ID: ${event.id}, Type: ${event.type}`);
   } catch (err) {
-    console.error('Webhook signature verification failed:', err);
+    console.error('[/webhook] Webhook signature verification failed:', err.message);
     return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
   // Deduplicate
   try {
+    console.log(`[/webhook] Checking if event ${event.id} has been processed...`);
     const existing = await ProcessedEvent.findOne({ eventId: event.id });
     if (existing) {
       console.log(`Event ${event.id} already processed; skipping.`);
@@ -47,22 +50,44 @@ app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res)
     }
   } catch (dbErr) {
     console.error('Error looking up processed event:', dbErr);
+    // Still attempt to process if lookup fails, but log it.
+    // Depending on policy, you might choose to return 500 here.
     return res.status(500).send('Internal Server Error');
   }
 
   // Handle checkout.session.completed
   if (event.type === 'checkout.session.completed') {
-    const session = event.data.object;
-    await leaderboardService.addEntry({
-      name: session.metadata.name,
-      amount: session.amount_total / 100,
-      stripeCustomerID: session.metadata.stripeCustomerID,
-      link: session.metadata.link || '',
-      message: session.metadata.message || ''
-    });
-    console.log(`✅ Payment received: £${session.amount_total / 100} from ${session.metadata.name}`);
+    const session = event.data.object; // session is a CheckoutSession object
+    const metadata = session.metadata;
+
+    // Construct the entry for the leaderboard service
+    const entryData = {
+      name: metadata.name,
+      amount: session.amount_total / 100, // amount_total is in cents
+      stripeCustomerID: metadata.stripeCustomerID,
+      locationLabel: metadata.locationLabel,
+      message: metadata.message || ''
+    };
+    console.log('[/webhook] Constructed entryData:', JSON.stringify(entryData, null, 2));
+
+    // Add position if lat and lng are present
+    if (metadata.lat && metadata.lng) {
+      entryData.position = {
+        type: 'Point',
+        coordinates: [parseFloat(metadata.lng), parseFloat(metadata.lat)] // GeoJSON is [longitude, latitude]
+      };
+    }
+    try {
+      console.log('[/webhook] Attempting to add entry to leaderboard...');
+      await leaderboardService.addEntry(entryData);
+      console.log(`[/webhook] ✅ Payment processed and entry added/updated for: ${entryData.name}, Amount: £${entryData.amount}`);
+    } catch (serviceErr) {
+      console.error('[/webhook] Error calling leaderboardService.addEntry:', serviceErr);
+      // Decide if you should return a 500 error to Stripe here.
+      // Generally, if you can't process, Stripe will retry.
+    }
   } else {
-    console.log(`Unhandled event type: ${event.type}`);
+    console.log(`[/webhook] Unhandled event type: ${event.type}`);
   }
 
   // Mark as processed
@@ -71,7 +96,6 @@ app.post('/webhook', express.raw({ type: 'application/json' }), async (req, res)
   } catch (err) {
     console.error('Failed to record processed event:', err);
   }
-
   return res.status(200).send('Event received');
 });
 
@@ -148,12 +172,10 @@ app.post(
   rateLimit({ windowMs: 60 * 1000, max: 10, message: 'Too many submissions; try again later.' }),
   [
     check('name').trim().notEmpty().withMessage('Name is required'),
-    check('email').isEmail().withMessage('Valid email is required').normalizeEmail(),
     check('amount').isFloat({ min: 1, max: 999999.99 }).withMessage('Amount must be between 1 and 999,999.99'),
-    check('link')
-      .optional({ checkFalsy: true })
-      .isURL({ protocols: ['http','https'], require_protocol: true })
-      .withMessage('Link must start with http:// or https://'),
+    check('locationLabel').trim().notEmpty().withMessage('Location is required'), // Assuming you get this from frontend
+    check('lat').isFloat().withMessage('Latitude is required'),
+    check('lng').isFloat().withMessage('Longitude is required'),
     check('message')
       .optional({ checkFalsy: true })
       .isString()
@@ -163,24 +185,27 @@ app.post(
   ],
   async (req, res) => {
     const errors = validationResult(req);
+    console.log('[/api/submit] Received request. Body:', JSON.stringify(req.body, null, 2));
     if (!errors.isEmpty()) {
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { name, amount, email, link, message } = req.body;
+    // Destructure all expected fields, including location data
+    const { name, amount, locationLabel, lat, lng, message } = req.body;
 
     try {
-      // Lookup or create Stripe customer
-      let customer;
-      const existing = await stripe.customers.list({ email, limit: 1 });
-      if (existing.data.length > 0) {
-        customer = existing.data[0];
-      } else {
-        customer = await stripe.customers.create({ email, name });
-      }
+      // Create a Stripe customer without email.
+      // Stripe will assign its own ID. You can pass a name if desired.
+      // If you still want to prevent duplicate entries by the same person without email,
+      // you'd need a different strategy (e.g., based on IP + name, or a user account system).
+      // For now, we'll create a new customer for each submission for simplicity if email is removed.
+      console.log('[/api/submit] Creating Stripe customer with name:', name);
+      const customer = await stripe.customers.create({ name });
 
       // Create Stripe Checkout session
+      console.log('[/api/submit] Creating Stripe Checkout session with metadata:', JSON.stringify({ name, amount: String(amount), stripeCustomerID: customer.id, locationLabel, lat: String(lat), lng: String(lng), message: message || '' }, null, 2));
       const session = await stripe.checkout.sessions.create({
+        customer: customer.id, // Associate session with the created customer
         payment_method_types: ['card'],
         line_items: [{
           price_data: {
@@ -193,13 +218,22 @@ app.post(
         mode: 'payment',
         success_url: process.env.FRONTEND_SUCCESS_URL,
         cancel_url: process.env.FRONTEND_CANCEL_URL,
-        metadata: { name, amount, stripeCustomerID: customer.id, link: link || '', message: message || '' }
+        metadata: {
+          name,
+          amount: String(amount), // Stripe metadata values must be strings
+          stripeCustomerID: customer.id,
+          locationLabel,
+          lat: String(lat),
+          lng: String(lng),
+          message: message || ''
+        }
       });
 
+      console.log('[/api/submit] Stripe Checkout session created successfully. Session ID:', session.id);
       res.json({ url: session.url });
     } catch (err) {
-      console.error('Payment error:', err);
-      res.status(500).json({ message: 'Payment error' });
+      console.error('[/api/submit] Error during Stripe operations:', err);
+      res.status(500).json({ message: 'Error processing payment submission' });
     }
   }
 );
