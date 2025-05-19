@@ -141,7 +141,7 @@ export default function Home() {
               lng: currentOwner.lng,
             },
           };
-          console.log('[Parent] Attempting to post message to globe:', messagePayload);
+          console.log('[Parent] Posting UPDATE_GLOBE_LOCATION to globe iframe:', JSON.stringify(messagePayload));
           globeIframeRef.current.contentWindow.postMessage(messagePayload, window.origin);
         } else {
           console.warn('[Parent] Current owner has no lat/lng. Not posting message to globe.');
@@ -334,12 +334,6 @@ export default function Home() {
           <section className="w-full lg:w-1/2 border-t lg:border-t-0 lg:border-l border-gray-800 p-4 sm:p-8 flex flex-col items-center">
             {/* Container for the Globe Iframe */}
             <div className="w-full h-96 mb-8 bg-black"> {/* Ensure this container is black */}
-              <iframe
-                ref={globeIframeRef}
-                src="/globe"
-                title="Interactive Globe"
-                style={{ width: '100%', height: '100%', border: 'none' }}
-              />
             </div>
             <h2 className="text-3xl font-semibold mb-6">Leaderboard</h2>
             {leaderboard.length > 0 ? (
