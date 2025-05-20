@@ -1,6 +1,9 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import Head from 'next/head';
 import usePlacesAutocomplete, { getGeocode, getLatLng } from 'use-places-autocomplete';
+// import dynamic from 'next/dynamic';
+import type { Location } from '../components/Globe';
+import GlobeComponent from '../components/Globe';
 
 interface ValidationError {
   msg: string;
@@ -9,15 +12,25 @@ interface ValidationError {
 }
 
 interface LeaderboardEntry {
+  _id?: string;
+  id?: string;
   name: string;
   amount: number;
   message?: string;
-  locationLabel?: string; // For displaying current owner's location
-  lat?: number; // For globe
-  lng?: number; // For globe
+  locationLabel?: string;
+  lat?: number;
+  lng?: number;
+  timestamp?: string;
 }
 
-// Define LocationInput outside of Home component for stability
+// const GlobeComponentWithNoSSR = dynamic( // Keep this commented out
+//   () => import('../components/Globe'),
+//   {
+//     ssr: false,
+//     loading: () => <div style={{ width: '100%', height: '400px', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'black', color: 'white' }}>Loading Globe...</div>
+//   }
+// );
+
 function LocationInput({
   onSelect
 }: {
@@ -43,29 +56,25 @@ function LocationInput({
         disabled={!ready}
         placeholder="Start typing your city..."
         className="w-full bg-transparent border-b border-white py-2 text-white placeholder-gray-400 focus:outline-none focus:border-blue-500"
+        autoComplete="off"
       />
       {status === 'OK' && (
-        <ul className="bg-white text-black max-h-40 overflow-y-auto">
+        <ul className="bg-white text-black max-h-40 overflow-y-auto mt-1 rounded shadow-lg z-10">
           {data.map((suggestion: { place_id: string; description: string }) => (
             <li
               key={suggestion.place_id}
               onClick={async () => {
-                // Set the input value immediately
-                setValue(suggestion.description, false); 
-
-                // Defer clearing suggestions and geocoding to allow React to process the setValue update
-                setTimeout(async () => {
-                  clearSuggestions();
-                  try {
-                    const results = await getGeocode({ placeId: suggestion.place_id });
-                    const { lat, lng } = await getLatLng(results[0]);
-                    onSelect({ label: suggestion.description, lat, lng });
-                  } catch (error) {
-                    console.error("Error processing place selection:", error);
-                  }
-                }, 0);
+                setValue(suggestion.description, false);
+                clearSuggestions();
+                try {
+                  const results = await getGeocode({ address: suggestion.description });
+                  const { lat, lng } = await getLatLng(results[0]);
+                  onSelect({ label: suggestion.description, lat, lng });
+                } catch (error) {
+                  console.error("Error processing place selection:", error);
+                }
               }}
-              className="px-2 py-1 hover:bg-gray-200 cursor-pointer"
+              className="px-3 py-2 hover:bg-gray-200 cursor-pointer"
             >
               {suggestion.description}
             </li>
@@ -80,18 +89,18 @@ export default function Home() {
   const [name, setName] = useState('');
   const [amount, setAmount] = useState('');
   const [entryMessage, setEntryMessage] = useState('');
-  const [message, setMessage] = useState('');
+  const [statusMessage, setStatusMessage] = useState('');
   const [loading, setLoading] = useState(false);
-  const [location, setLocation] = useState<{ label: string; lat: number; lng: number } | null>(null);
+  const [location, setLocation] = useState<{ label: string; lat: number; lng: number } | null>(null); // Correct state name
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
-  const globeIframeRef = useRef<HTMLIFrameElement | null>(null);
-  const [isGlobeListenerReady, setIsGlobeListenerReady] = useState(false);
+  const [isClientMounted, setIsClientMounted] = useState(false);
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL!;
 
   const fetchLeaderboard = useCallback(async () => {
     try {
       const res = await fetch(`${apiUrl}/api/leaderboard`);
+      if (!res.ok) throw new Error(`Failed to fetch: ${res.status}`);
       const data = (await res.json()) as LeaderboardEntry[];
       setLeaderboard(data);
     } catch (err) {
@@ -100,102 +109,41 @@ export default function Home() {
   }, [apiUrl]);
 
   useEffect(() => {
+    setIsClientMounted(true);
     fetchLeaderboard();
   }, [fetchLeaderboard]);
 
-  useEffect(() => {
-    const handleIframeMessage = (event: MessageEvent) => {
-      // Important: Check the origin of the message for security
-      if (event.origin !== window.origin) {
-        // Or if your iframe is on a different known origin:
-        // if (event.origin !== 'expected-iframe-origin.com') {
-        console.warn('[Parent] Message received from unexpected origin:', event.origin);
-        return;
-      }
-
-      if (event.data && event.data.type === 'GLOBE_LISTENER_READY') {
-        console.log('[Parent] Received GLOBE_LISTENER_READY from iframe.');
-        setIsGlobeListenerReady(true);
-      }
-    };
-
-    window.addEventListener('message', handleIframeMessage);
-    return () => {
-      window.removeEventListener('message', handleIframeMessage);
-    };
-  }, []); // Empty dependency array, runs once on mount
-
-  useEffect(() => {
-    console.log('[Parent] Leaderboard updated. Length:', leaderboard.length);
-    if (leaderboard.length > 0 && isGlobeListenerReady) { // Only proceed if listener is ready
-      const currentOwner = leaderboard[0];
-      console.log('[Parent] Current owner data for globe:', currentOwner);
-
-      if (globeIframeRef.current && globeIframeRef.current.contentWindow) {
-        console.log('[Parent] Iframe reference and contentWindow found.');
-        if (currentOwner.lat !== undefined && currentOwner.lng !== undefined) {
-          const messagePayload = {
-            type: 'UPDATE_GLOBE_LOCATION',
-            payload: {
-              lat: currentOwner.lat,
-              lng: currentOwner.lng,
-            },
-          };
-          console.log('[Parent] Posting UPDATE_GLOBE_LOCATION to globe iframe:', JSON.stringify(messagePayload));
-          globeIframeRef.current.contentWindow.postMessage(messagePayload, window.origin);
-        } else {
-          console.warn('[Parent] Current owner has no lat/lng. Not posting message to globe.');
-        }
-      } else {
-        console.warn('[Parent] Globe iframe reference or contentWindow not available yet.');
-      }
-    } else if (leaderboard.length > 0 && !isGlobeListenerReady) {
-      console.log('[Parent] Leaderboard updated, but globe listener is not ready yet. Message will be sent when ready.');
-    } else {
-      console.log('[Parent] Leaderboard is empty. Not attempting to post message.');
-    }
-  }, [leaderboard, isGlobeListenerReady]); // Re-run when leaderboard OR isGlobeListenerReady changes
-  
-
   const handleLocationSelect = useCallback((loc: { label: string; lat: number; lng: number }) => {
-    setLocation(loc);
-    // console.log('Location selected:', loc); // Optional: for debugging
-  }, []); // setLocation is stable, so empty dependency array is fine
+    setLocation(loc); // Corrected: Use setLocation
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setMessage(''); // Clear previous messages
+    setStatusMessage('');
+    setLoading(true);
 
-    // Client-side validation
     const validationErrorMessages: string[] = [];
-    if (!name.trim()) {
-      validationErrorMessages.push('Name is required.');
-    }
-    if (!location) {
-      validationErrorMessages.push('City & Country is required.');
-    }
+    if (!name.trim()) validationErrorMessages.push('Name is required.');
+    if (!location) validationErrorMessages.push('City & Country is required.'); // 'location' is the state variable
     const amt = parseFloat(amount);
-    if (isNaN(amt) || amt < 1) {
-      validationErrorMessages.push('Bid must be at least £1.');
-    }
+    if (isNaN(amt) || amt < 1) validationErrorMessages.push('Bid must be at least £1.');
 
     if (validationErrorMessages.length > 0) {
-      setMessage(validationErrorMessages.join(' '));
-      setLoading(false); // Ensure loading is reset
+      setStatusMessage(validationErrorMessages.join(' '));
+      setLoading(false);
       return;
     }
 
-    setLoading(true);
-
+    let res; // Define res here to be accessible in finally
     try {
-      const res = await fetch(`${apiUrl}/api/submit`, {
+      res = await fetch(`${apiUrl}/api/submit`, { // Assign to the outer res
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name,
-          locationLabel: location!.label,
-          lat: location!.lat,
-          lng: location!.lng,
+          locationLabel: location!.label, // location state variable
+          lat: location!.lat,       // location state variable
+          lng: location!.lng,       // location state variable
           amount: amt,
           message: entryMessage
         })
@@ -204,18 +152,12 @@ export default function Home() {
 
       if (!res.ok) {
         if (data.errors && Array.isArray(data.errors)) {
-          const backendErrors = (data.errors as ValidationError[])
-            .filter(err => err.param !== 'email') // Filter out backend email validation errors
-            .map(err => err.msg);
-          if (backendErrors.length > 0) {
-            setMessage(backendErrors.join(' '));
-          } else {
-            setMessage('An unexpected validation error occurred. Please check your input.');
-          }
+          const backendErrors = (data.errors as ValidationError[]).map(err => err.msg);
+          setStatusMessage(backendErrors.join(' '));
         } else if (data.message) {
-          setMessage(data.message);
+          setStatusMessage(data.message);
         } else {
-          setMessage('Something went wrong. Please try again.');
+          setStatusMessage('Something went wrong. Please try again.');
         }
         setLoading(false);
         return;
@@ -223,26 +165,49 @@ export default function Home() {
 
       if (data.url) {
         window.location.href = data.url;
-        return;
+        return; // setLoading(false) is not needed on redirect
       }
 
-      setMessage('Submission succeeded, but no redirect URL provided.');
-      setLoading(false);
-    } catch (err) {
+      setStatusMessage(data.message || 'Submission successful!');
+      await fetchLeaderboard();
+      setName('');
+      setAmount('');
+      setEntryMessage('');
+      setLocation(null);
+      // Consider resetting LocationInput value here
+      // (e.g., by passing `value` to LocationInput and having a reset function, or by key change)
+      setLoading(false); // Set loading to false on non-redirect success
+
+    } catch (err: any) {
       console.error(err);
-      setMessage('Network error. Please try again.');
-      setLoading(false);
+      setStatusMessage(err.message || 'Network error. Please try again.');
+      setLoading(false); // Also set loading to false on catch
     }
+    // Removed the complex finally block for setLoading as it's handled in try/catch now
   };
+  
+  // Data for the globe - Simplified for this test
+  const globeData: Location[] = leaderboard
+    .map(entry => ({
+      lat: entry.lat,
+      lng: entry.lng,
+      owner: entry.name, 
+      locationLabel: entry.locationLabel,
+    }))
+    .filter((loc): loc is Location => // Type predicate to ensure lat/lng are numbers
+      typeof loc.lat === 'number' && typeof loc.lng === 'number'
+    );
+
 
   return (
     <>
       <Head>
-        <title>The Cookie – Claim the One-and-Only Digital Cookie</title>
+        <title>The Cookie Globe – Static Import Test (Simplified)</title>
         <meta
           name="description"
-          content="Only one person can own The Cookie at a time. Bid higher than the last owner to claim it and earn eternal bragging rights!"
+          content="Testing static import of simplified globe for The Cookie project."
         />
+        <link rel="icon" href="/favicon.ico" />
       </Head>
 
       <main className="w-full min-h-screen bg-black text-white font-sans overflow-y-auto">
@@ -261,9 +226,7 @@ export default function Home() {
               </p>
             )}
 
-
             <form onSubmit={handleSubmit} className="space-y-6 max-w-xl" noValidate>
-              {/* Name */}
               <div>
                 <label htmlFor="name" className="block text-gray-400 mb-1">
                   Your Name or Alias
@@ -278,13 +241,11 @@ export default function Home() {
                 />
               </div>
 
-              {/* Location */}
               <LocationInput onSelect={handleLocationSelect} />
 
-              {/* Message */}
               <div>
                 <label htmlFor="entryMessage" className="block text-gray-400 mb-1">
-                  Add a Message (Optional)
+                  Add a Message (Optional, max 70 chars)
                 </label>
                 <textarea
                   id="entryMessage"
@@ -296,10 +257,9 @@ export default function Home() {
                 />
               </div>
 
-              {/* Amount */}
               <div>
                 <label htmlFor="amount" className="block text-gray-400 mb-1">
-                  Amount
+                  Your Bid Amount (£)
                 </label>
                 <input
                   id="amount"
@@ -314,9 +274,9 @@ export default function Home() {
                 />
               </div>
 
-              {message && (
-                <p className="text-red-400 text-sm" role="alert">
-                  {message}
+              {statusMessage && (
+                <p className={`text-sm ${statusMessage.includes('required') || statusMessage.includes('error') || statusMessage.includes('wrong') || statusMessage.includes('Network') ? 'text-red-400' : 'text-green-400'}`} role="alert">
+                  {statusMessage}
                 </p>
               )}
 
@@ -332,35 +292,46 @@ export default function Home() {
 
           {/* Right: Globe + Leaderboard */}
           <section className="w-full lg:w-1/2 border-t lg:border-t-0 lg:border-l border-gray-800 p-4 sm:p-8 flex flex-col items-center">
-            {/* Container for the Globe Iframe */}
-            <div className="w-full h-96 mb-8 bg-black"> {/* Ensure this container is black */}
+            <div className="w-full h-96 lg:h-[50vh] mb-8 bg-black relative">
+              {isClientMounted ? (
+                <GlobeComponent locations={globeData} />
+              ) : (
+                <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'black', color: 'white' }}>Initializing Client State...</div>
+              )}
             </div>
+            
             <h2 className="text-3xl font-semibold mb-6">Leaderboard</h2>
             {leaderboard.length > 0 ? (
-              <table className="w-full text-white" role="table">
-                <thead>
-                  <tr className="border-b border-gray-700 text-sm text-gray-400 uppercase tracking-wider">
-                    <th className="px-2 py-2 sm:px-4 text-left">#</th>
-                    <th className="px-2 py-2 sm:px-4 text-left">Name / Alias</th>
-                    <th className="px-2 py-2 sm:px-4 text-left hidden md:table-cell">Message</th>
-                    <th className="px-2 py-2 sm:px-4 text-right">Amount Paid</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {leaderboard.map((entry, i) => (
-                    <tr key={i} className="hover:bg-gray-900 border-b border-gray-800">
-                      <td className="px-2 py-3 sm:px-4 whitespace-nowrap">{i + 1}</td>
-                      <td className="px-2 py-3 sm:px-4 min-w-0">{entry.name}</td>
-                      <td className="px-2 py-3 sm:px-4 text-sm text-gray-400 hidden md:table-cell max-w-[120px] overflow-hidden break-words">
-                        {entry.message || <span className="text-gray-600">-</span>}
-                      </td>
-                      <td className="px-2 py-3 sm:px-4 text-right whitespace-nowrap">
-                        £{entry.amount.toLocaleString('en-GB', { minimumFractionDigits: 2 })}
-                      </td>
+              <div className="w-full overflow-x-auto">
+                <table className="w-full min-w-[600px] text-white" role="table">
+                  <thead>
+                    <tr className="border-b border-gray-700 text-sm text-gray-400 uppercase tracking-wider">
+                      <th className="px-2 py-2 sm:px-4 text-left">#</th>
+                      <th className="px-2 py-2 sm:px-4 text-left">Name / Alias</th>
+                      <th className="px-2 py-2 sm:px-4 text-left hidden md:table-cell">Message</th>
+                      <th className="px-2 py-2 sm:px-4 text-left hidden lg:table-cell">Location</th>
+                      <th className="px-2 py-2 sm:px-4 text-right">Amount Paid</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {leaderboard.map((entry, i) => (
+                      <tr key={entry._id || entry.id || i} className="hover:bg-gray-900 border-b border-gray-800">
+                        <td className="px-2 py-3 sm:px-4 whitespace-nowrap">{i + 1}</td>
+                        <td className="px-2 py-3 sm:px-4">{entry.name}</td>
+                        <td className="px-2 py-3 sm:px-4 text-sm text-gray-300 hidden md:table-cell max-w-[120px] overflow-hidden break-words">
+                          {entry.message || <span className="text-gray-600">-</span>}
+                        </td>
+                        <td className="px-2 py-3 sm:px-4 text-sm text-gray-300 hidden lg:table-cell max-w-[150px] overflow-hidden break-words">
+                          {entry.locationLabel || <span className="text-gray-600">-</span>}
+                        </td>
+                        <td className="px-2 py-3 sm:px-4 text-right whitespace-nowrap">
+                          £{typeof entry.amount === 'number' ? entry.amount.toLocaleString('en-GB', { minimumFractionDigits: 2 }) : 'N/A'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             ) : (
               <p className="text-gray-400">No entries yet—be the first to claim The Cookie!</p>
             )}
